@@ -1,42 +1,57 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-var head: *Chunk = undefined;
-var chunks_per_block: usize = undefined;
+pub const PoolAllocator = struct {
+    const Self = @This();
+    const pal = std.heap.page_allocator;
+    const L = std.SinglyLinkedList(**u64);
 
-pub const Chunk = struct {
-    next: *Chunk,
-    val: u32
-};
+    memory: L = .{},
 
-pub fn init(cpb: usize) void {
-    chunks_per_block = cpb;
-}
-
-pub fn allocate(size: usize) ?*Chunk {
-    if(head == undefined) { head = alloc_block(size) catch return null; }
-    
-    const f = head;
-    head = head.next;
-    
-    return f;
-}
-
-pub fn free(chunk: *Chunk) void {
-    chunk.next = head;
-    head = chunk;
-}
-
-fn alloc_block(size: usize) !*Chunk {
-    const block_size = chunks_per_block * size;
-    const b: *Chunk = @ptrCast(try std.heap.page_allocator.alloc(Chunk, block_size));
-    var c = b[0];
-
-    for(0..(chunks_per_block - 1)) |_| {
-        c.next = c + size;
-        c = c.next;
+    pub fn allocator(self: *Self) Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .free = free
+            }
+        };
     }
 
-    c.next = null;
-    return b;
-}
+    fn alloc(ctx: *anyopaque, size: usize, _: u8, _: usize) ?[*]u8 { 
+        if(size > @as(usize, @sizeOf(u64))) { return null; }
+        const s: *Self = @ptrCast(@alignCast(ctx));
+        return alloc_inner(s);
+    }
+
+    fn resize(_: *anyopaque, _: []u8, _: u8, _: usize, _: usize) bool { return false; }
+
+    fn free(ctx: *anyopaque, ptr: []u8, _: u8, _: usize) void {
+        const s: *Self = @ptrCast(@alignCast(ctx));
+        free_inner(s, @ptrCast(@alignCast(ptr.ptr)));
+    }
+
+    fn alloc_inner(self: *Self) ?[*]u8 {
+        var b: *u64 = pal.create(u64) catch return null;
+        var n = L.Node{ .data = &b };
+        self.memory.prepend(&n);
+
+        return @ptrCast(b);
+    }
+
+    fn free_inner(self: *Self, p: *u64) void {
+        var it = self.memory.first;
+        var n: *L.Node = undefined;
+        while(it) |node| : (it = node.next) {
+            if(node.data.* == p) {
+                n = node;
+                pal.destroy(n.data.*);
+                self.memory.remove(n);
+                return;
+            }
+        }
+
+    }
+
+};
